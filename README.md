@@ -1,5 +1,9 @@
 # GitForge — Standalone GitHub-Compatible Git Forge
 
+[![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/rjrajput-web3/github-core-clone-01-entry/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/rjrajput-web3/github-core-clone-01-entry/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
+
 A fast, dependency-free git forge for [the contest](https://make.fun/bounty/github-core-clone-01):
 git smart HTTP (v0 + v2, upload-pack and receive-pack), GitHub REST v3, GraphQL v4
 and MCP over streamable HTTP — all in one Node process, all in memory, tuned for
