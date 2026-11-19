@@ -1,1 +1,1 @@
-{"main":"main.ts","name":"github-core-clone-01-entry","private":true,"type":"module","version":"1.0.0"}
+{"description":"A standalone GitHub-compatible git forge: git smart HTTP, REST v3, GraphQL v4 and MCP from one process over its own in-memory store.","engines":{"node":">=22"},"license":"MIT","name":"github-core-clone-01-entry","private":true,"scripts":{"build":"./build.sh","start":"node main.ts"},"type":"module","version":"1.0.0"}
