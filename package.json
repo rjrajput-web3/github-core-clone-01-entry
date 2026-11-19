@@ -1,1 +1,1 @@
-{"description":"GitForge — a fast, standalone GitHub-compatible git forge: smart HTTP, REST v3, GraphQL v4 and MCP, zero dependencies.","engines":{"node":">=22"},"license":"MIT","name":"github-core-clone-01-entry","private":true,"scripts":{"start":"node --experimental-strip-types main.ts"},"type":"module","version":"1.0.0"}
+{"description":"GitForge — standalone GitHub-compatible git forge (Go core, Node launcher)","name":"gitforge","scripts":{"build":"./build.sh","start":"node --experimental-strip-types main.ts"},"type":"module","version":"1.0.0"}
