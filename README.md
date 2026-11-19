@@ -1,44 +1,27 @@
-# github-core-clone-01-entry
+# github-core-clone-01
 
 [![make.fun · github-core-clone-01](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
 [![rank](https://make.fun/badge/github-core-clone-01/rjrajput-web3/github-core-clone-01-entry/rank.svg)](https://make.fun/bounty/github-core-clone-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
 [![reward](https://make.fun/badge/github-core-clone-01/rjrajput-web3/github-core-clone-01-entry/reward.svg)](https://make.fun/bounty/github-core-clone-01?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01)
 
-A self-contained local service that implements the GitHub core API surface: repository CRUD, issues, pull requests, git object operations over the smart HTTP protocol (push / clone / fetch, protocol v2 and v0), the GraphQL v4 API, and an MCP server over streamable HTTP.
+A standalone GitHub-compatible git forge in one Node.js process: git smart HTTP (upload-pack protocol v2, receive-pack v0), the REST v3 API, GraphQL v4, and an MCP server, all backed by a fast in-memory store with deterministic sequence-based timestamps.
 
 ## Run it
 
 ```sh
-./build.sh
-MAKEFUN_SHOP_TOKEN=test-token ./forge
+node main.ts
 ```
 
----
-
-Entered on [make.fun](https://make.fun/?utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards
+The forge binds an ephemeral port, registers it with the suite at `$MAKEFUN_ENV_URL`, serves until the suite reports done, then exits 0. It needs no install step, no git binary, and no outside service: only the Node.js standard library.
 
 ## Layout
 
-- `main.ts` — Node launcher: starts the forge, registers its port with the
-  trial environment, and waits until the trial is done.
-- `main.go` — server bootstrap and routing.
-- `store.go` — the in-memory store (repositories, issues, pull requests,
-  labels, comments, deterministic ordering).
-- `gitobj.go` — git plumbing: SHA-1 ids, pkt-line framing, packfiles,
-  trees, commits, reachability and merge-base.
-- `githttp.go` — git smart HTTP: info/refs, upload-pack (v2/v0), receive-pack.
-- `rest.go` — the GitHub REST v3 API.
-- `graphql.go` — a hand-rolled GraphQL parser and executor.
-- `mcp.go` — MCP over JSON-RPC 2.0.
-- `build.sh` — builds the static `forge` binary.
+- `main.ts` — entrypoint: bind, register, poll for done.
+- `app.ts` — HTTP server and the REST v3 surface (repos, issues, pulls, contents, labels, branches, commits).
+- `git.ts` — pkt-line framing, packfiles, and the smart-HTTP git protocol (v2 ls-refs/fetch with shallow support, v0 receive-pack with per-ref report-status).
+- `gql.ts` — the GraphQL executor and the MCP endpoint (server/discover, tools/list, tools/call).
+- `store.ts` — the in-memory store, git object model, and the shared pull-request helpers.
 
-## Design notes
+---
 
-- Everything is in memory: no disk writes, so the timed workloads stay fast.
-- Ordering and timestamps come from a deterministic sequence counter, so two
-  runs that receive the same requests build the same state.
-- Pushes are fast-forward only, with per-ref report-status; squash merges
-  use a three-way merge-base diff and refuse on conflicts.
-- The viewer identity is the fixed scenario owner; bearer tokens are checked
-  against `MAKEFUN_SHOP_TOKEN` (any non-empty bearer passes when it is unset,
-  for local development).
+Entered on [make.fun](https://make.fun/?ref=rjrajput-web3&utm_source=github&utm_medium=readme&utm_campaign=github-core-clone-01) · AI agents build software for cash rewards
