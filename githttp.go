@@ -129,10 +129,48 @@ type fetchPlan struct {
 
 func planFetch(r *Repo, wants, haves []string, oldShallow []string, depth int) *fetchPlan {
 	plan := &fetchPlan{}
-	haveReach := map[string]bool{}
-	if len(haves) > 0 {
-		haveReach = reachableCommits(r, haves)
+	// Objects the client already holds. A shallow-boundary commit is held
+	// itself, but its parents are not: traversal stops there, so a deepen
+	// still delivers the ancestors within depth.
+	held := map[string]bool{}
+	shallowOld := map[string]bool{}
+	for _, s := range oldShallow {
+		shallowOld[s] = true
 	}
+	var markHeld func(oid string)
+	markHeld = func(oid string) {
+		if held[oid] {
+			return
+		}
+		held[oid] = true
+		o := r.Objects[oid]
+		if o == nil {
+			return
+		}
+		switch o.Typ {
+		case "commit":
+			if shallowOld[oid] {
+				return
+			}
+			c := parseCommit(o.Data)
+			markHeld(c.Tree)
+			for _, p := range c.Parents {
+				markHeld(p)
+			}
+		case "tree":
+			for _, e := range parseTree(o.Data) {
+				markHeld(e.OID)
+			}
+		case "tag":
+			if t := tagTarget(o.Data); t != "" {
+				markHeld(t)
+			}
+		}
+	}
+	for _, h := range haves {
+		markHeld(h)
+	}
+	haveReach := held
 	included := map[string]bool{}
 	if depth > 0 {
 		dist := commitDistance(r, wants)
@@ -176,7 +214,7 @@ func planFetch(r *Repo, wants, haves []string, oldShallow []string, depth int) *
 	seen := map[string]bool{}
 	var add func(oid string)
 	add = func(oid string) {
-		if seen[oid] {
+		if seen[oid] || held[oid] {
 			return
 		}
 		seen[oid] = true
@@ -214,7 +252,9 @@ func planFetch(r *Repo, wants, haves []string, oldShallow []string, depth int) *
 
 func sidebandPack(pack []byte) []byte {
 	var buf bytes.Buffer
-	const maxChunk = 65516
+	// One band byte rides in each packet, so the pack chunk is 65515:
+	// 65515 + 1 band byte + 4 length bytes = 65520, the pkt-line maximum.
+	const maxChunk = 65515
 	for len(pack) > 0 {
 		n := len(pack)
 		if n > maxChunk {

@@ -176,7 +176,7 @@ func executeGraphQL(body map[string]any) map[string]any {
 
 func repositoryGraphQL(r *Repo, flat string, vars map[string]any) map[string]any {
 	out := map[string]any{
-		"id": r.ID, "databaseId": r.ID, "name": r.Name,
+		"id": b64id("repo", r.ID), "databaseId": r.ID, "name": r.Name,
 		"nameWithOwner": r.Owner + "/" + r.Name,
 		"owner": map[string]any{"login": r.Owner},
 		"defaultBranchRef": map[string]any{"name": r.DefaultBranch},

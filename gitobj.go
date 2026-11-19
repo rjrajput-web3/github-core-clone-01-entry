@@ -588,7 +588,9 @@ func (r *pktReader) next() (kind string, payload []byte, err error) {
 	return "data", payload, nil
 }
 
-// readPktLines consumes pkt-lines until flush/delim/eof, returning payloads.
+// readPktLines consumes pkt-lines until flush/eof, returning payloads.
+// A delim packet (0001) only separates sections in protocol v2 requests
+// (command/args come after it), so it is skipped, not treated as the end.
 func readPktLines(data []byte) ([][]byte, int, error) {
 	r := &pktReader{data: data}
 	var out [][]byte
@@ -599,6 +601,9 @@ func readPktLines(data []byte) ([][]byte, int, error) {
 		}
 		if kind == "data" {
 			out = append(out, payload)
+			continue
+		}
+		if kind == "delim" {
 			continue
 		}
 		return out, r.pos, nil
