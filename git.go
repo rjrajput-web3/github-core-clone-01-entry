@@ -533,12 +533,12 @@ func sidebandPack(pack []byte) [][]byte {
 }
 
 type fetchArgs struct {
-	wants   []string
-	haves   []string
-	shallow []string
-	depth   int
+	wants    []string
+	haves    []string
+	shallow  []string
+	depth    int
 	hasDepth bool
-	filter  string
+	filter   string
 }
 
 func handleUploadPack(s *Store, owner, name string, body []byte, isV2 bool) GitResponse {

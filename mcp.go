@@ -246,7 +246,7 @@ func mcpPRJSON(repo *Repo, pr *Pull) map[string]interface{} {
 		"state": pr.State, "merged": pr.Merged,
 		"head": map[string]interface{}{"ref": pr.HeadRef, "sha": headSha},
 		"base": map[string]interface{}{"ref": pr.BaseRef, "sha": baseSha},
-		"merged_at":      nullableStr(pr.MergedAt),
+		"merged_at":       nullableStr(pr.MergedAt),
 		"merge_commit_sha": nullableStr(pr.MergeCommitSha),
 		"html_url":        "/" + repo.Owner + "/" + repo.Name + "/pull/" + itoa(pr.Number),
 	}

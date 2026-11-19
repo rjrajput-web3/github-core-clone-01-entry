@@ -48,9 +48,9 @@ type selectionNode struct {
 }
 
 type operationNode struct {
-	typ       string // query | mutation
-	name      string
-	variables []string
+	typ        string // query | mutation
+	name       string
+	variables  []string
 	selections []selectionNode
 }
 
@@ -438,21 +438,21 @@ var typeEnumValues = map[string][]string{
 
 // nodeValue is one resolved GraphQL object.
 type nodeValue struct {
-	kind       string
-	login      string
-	repo       *Repo
-	name       string // Ref name
-	issue      *Issue
-	issues     []*Issue
-	endCursor  string
+	kind         string
+	login        string
+	repo         *Repo
+	name         string // Ref name
+	issue        *Issue
+	issues       []*Issue
+	endCursor    string
 	hasEndCursor bool
-	hasNextPage bool
-	pr         *Pull
-	prs        []*Pull
-	files      []string
-	typeName   string
-	commentID  string
-	commentBody string
+	hasNextPage  bool
+	pr           *Pull
+	prs          []*Pull
+	files        []string
+	typeName     string
+	commentID    string
+	commentBody  string
 }
 
 func issueGid(repo *Repo, issue *Issue) string { return gid("I", repo.ID, issue.Number) }
