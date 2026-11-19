@@ -1,260 +1,439 @@
-// GitForge MCP server: JSON-RPC 2.0 over Streamable HTTP (POST /mcp), acting
-// on the same in-memory store as the REST and GraphQL surfaces. Faithful port
-// of the Node mcp.ts. The tools list is a precomputed constant so tools/list
-// is byte-identical across calls.
+// MCP over Streamable HTTP: JSON-RPC 2.0 at POST /mcp. Modern era
+// (2026-07-28) answers server/discover; the legacy era answers initialize.
+// The same six tools the suite exercises are offered, and every tool call
+// reads and writes the same store the REST API uses.
 package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"strconv"
 	"strings"
 )
 
-// toolsJSON is the exact JSON of the TOOLS array (field order as produced by
-// the original implementation: name, description, inputSchema{type,
-// properties, required}).
-const toolsJSON = `[{"name":"create_repo","description":"Create a new repository for the authenticated user.","inputSchema":{"type":"object","properties":{"name":{"type":"string","description":"Repository name"},"description":{"type":"string","description":"Repository description"},"private":{"type":"boolean","description":"Whether the repository is private"}},"required":["name"]}},{"name":"get_repo","description":"Get a repository by owner and name.","inputSchema":{"type":"object","properties":{"owner":{"type":"string","description":"Repository owner login"},"repo":{"type":"string","description":"Repository name"}},"required":["owner","repo"]}},{"name":"create_issue","description":"Create an issue in a repository.","inputSchema":{"type":"object","properties":{"owner":{"type":"string","description":"Repository owner login"},"repo":{"type":"string","description":"Repository name"},"title":{"type":"string","description":"Issue title"},"body":{"type":"string","description":"Issue body"}},"required":["owner","repo","title"]}},{"name":"list_issues","description":"List issues in a repository.","inputSchema":{"type":"object","properties":{"owner":{"type":"string","description":"Repository owner login"},"repo":{"type":"string","description":"Repository name"},"state":{"type":"string","description":"Issue state filter: open, closed, or all"}},"required":["owner","repo"]}},{"name":"create_pull_request","description":"Create a pull request in a repository.","inputSchema":{"type":"object","properties":{"owner":{"type":"string","description":"Repository owner login"},"repo":{"type":"string","description":"Repository name"},"title":{"type":"string","description":"Pull request title"},"body":{"type":"string","description":"Pull request body"},"head":{"type":"string","description":"Head branch name"},"base":{"type":"string","description":"Base branch name"}},"required":["owner","repo","title","head","base"]}},{"name":"merge_pull_request","description":"Merge a pull request in a repository.","inputSchema":{"type":"object","properties":{"owner":{"type":"string","description":"Repository owner login"},"repo":{"type":"string","description":"Repository name"},"pull_number":{"type":"integer","description":"Pull request number"}},"required":["owner","repo","pull_number"]}}]`
+var mcpVersions = []string{"2026-07-28", "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 
-var toolRequired = map[string][]string{
-	"create_repo":         {"name"},
-	"get_repo":            {"owner", "repo"},
-	"create_issue":        {"owner", "repo", "title"},
-	"list_issues":         {"owner", "repo"},
-	"create_pull_request": {"owner", "repo", "title", "head", "base"},
-	"merge_pull_request":  {"owner", "repo", "pull_number"},
+var mcpLegacyVersions = map[string]bool{
+	"2025-11-25": true,
+	"2025-06-18": true,
+	"2025-03-26": true,
+	"2024-11-05": true,
 }
 
-type mcpResult struct {
-	Status int
-	Body   string
+// mcpTool is one entry of the tools/list answer.
+type mcpTool struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"inputSchema"`
 }
 
-func rpcResult(id interface{}, result string) mcpResult {
-	return mcpResult{200, `{"jsonrpc":"2.0","id":` + string(marshalJSON(id)) + `,"result":` + result + `}`}
+func strProp() map[string]any { return map[string]any{"type": "string"} }
+func boolProp() map[string]any { return map[string]any{"type": "boolean"} }
+func intProp() map[string]any  { return map[string]any{"type": "integer"} }
+
+func schema(props map[string]any, required []string) map[string]any {
+	return map[string]any{
+		"type":       "object",
+		"properties": props,
+		"required":   required,
+	}
 }
 
-func rpcError(id interface{}, code int, message string, status int) mcpResult {
-	return mcpResult{status, `{"jsonrpc":"2.0","id":` + string(marshalJSON(id)) + `,"error":{"code":` + itoa(code) + `,"message":` + qjson(message) + `}}`}
+func mcpTools() []mcpTool {
+	return []mcpTool{
+		{
+			Name:        "create_repo",
+			Description: "Create a repository owned by the authenticated user.",
+			InputSchema: schema(map[string]any{
+				"name":        strProp(),
+				"description": strProp(),
+				"private":     boolProp(),
+			}, []string{"name"}),
+		},
+		{
+			Name:        "get_repo",
+			Description: "Get a repository by owner and name.",
+			InputSchema: schema(map[string]any{
+				"owner": strProp(),
+				"repo":  strProp(),
+			}, []string{"owner", "repo"}),
+		},
+		{
+			Name:        "create_issue",
+			Description: "Create an issue in a repository.",
+			InputSchema: schema(map[string]any{
+				"owner": strProp(),
+				"repo":  strProp(),
+				"title": strProp(),
+				"body":  strProp(),
+			}, []string{"owner", "repo", "title"}),
+		},
+		{
+			Name:        "list_issues",
+			Description: "List issues in a repository.",
+			InputSchema: schema(map[string]any{
+				"owner": strProp(),
+				"repo":  strProp(),
+				"state": strProp(),
+			}, []string{"owner", "repo"}),
+		},
+		{
+			Name:        "create_pull_request",
+			Description: "Create a pull request from a head branch onto a base branch.",
+			InputSchema: schema(map[string]any{
+				"owner": strProp(),
+				"repo":  strProp(),
+				"title": strProp(),
+				"head":  strProp(),
+				"base":  strProp(),
+			}, []string{"owner", "repo", "title", "head", "base"}),
+		},
+		{
+			Name:        "merge_pull_request",
+			Description: "Squash-merge a pull request by number.",
+			InputSchema: schema(map[string]any{
+				"owner":       strProp(),
+				"repo":        strProp(),
+				"pull_number": intProp(),
+			}, []string{"owner", "repo", "pull_number"}),
+		},
+	}
 }
 
-func toolResult(result interface{}) string {
-	return `{"content":[{"type":"text","text":` + qjson(string(marshalJSON(result))) + `}],"structuredContent":` + string(marshalJSON(result)) + `,"isError":false}`
+func mcpServerInfo() map[string]any {
+	return map[string]any{"name": "forge", "version": "1.0.0"}
 }
 
-func toolError(message string) string {
-	return `{"content":[{"type":"text","text":` + qjson(message) + `}],"structuredContent":null,"isError":true}`
-}
-
-func handleMcp(s *Store, rawBody []byte) mcpResult {
-	var body interface{}
-	if err := json.Unmarshal(rawBody, &body); err != nil {
-		return rpcError(nil, -32700, "Parse error", 400)
+func (s *server) serveMCP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		errJSON(w, 404, "Not Found")
+		return
 	}
-	req, ok := body.(map[string]interface{})
-	if !ok {
-		return rpcError(nil, -32600, "Invalid Request", 400)
+	// Auth is decided before any parsing: a call without a token is 401.
+	if !s.authed(r) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"Requires authentication"}}` + "\n"))
+		return
 	}
-	var id interface{}
-	if v, ok := req["id"]; ok {
-		id = v
+	var raw json.RawMessage
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	if err := dec.Decode(&raw); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}` + "\n"))
+		return
 	}
-	method, _ := req["method"].(string)
-
-	if method == "notifications/initialized" {
-		return mcpResult{202, ""}
+	var req struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
 	}
-	if method == "" {
-		return rpcError(id, -32600, "Invalid Request", 200)
+	if err := json.Unmarshal(raw, &req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}` + "\n"))
+		return
 	}
-
-	if method == "server/discover" {
-		return rpcResult(id, `{"supportedVersions":["2026-07-28","2025-06-18","2025-03-26"],"capabilities":{"tools":{}},"serverInfo":{"name":"`+ForgeName+`","version":"`+ForgeVersion+`"}}`)
+	// A notification carries no id: answer 202 with an empty body.
+	if len(req.ID) == 0 || string(req.ID) == "null" {
+		w.WriteHeader(202)
+		return
 	}
-	if method == "initialize" {
-		params, _ := req["params"].(map[string]interface{})
-		proto := "2026-07-28"
-		if v, ok := params["protocolVersion"].(string); ok {
-			proto = v
+	var id any
+	if err := json.Unmarshal(req.ID, &id); err != nil {
+		id = nil
+	}
+	// Normalise json.Number ids to int64/float64 for a faithful echo.
+	if n, ok := id.(json.Number); ok {
+		if i, err := n.Int64(); err == nil {
+			id = i
+		} else if f, err := n.Float64(); err == nil {
+			id = f
 		}
-		return rpcResult(id, `{"protocolVersion":`+qjson(proto)+`,"capabilities":{"tools":{}},"serverInfo":{"name":"`+ForgeName+`","version":"`+ForgeVersion+`"}}`)
 	}
-	if method == "ping" {
-		return rpcResult(id, `{}`)
+	respond := func(result any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"result":  result,
+		})
 	}
-	if method == "tools/list" {
-		return rpcResult(id, `{"tools":`+toolsJSON+`}`)
+	respondErr := func(code int, msg string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"error":   map[string]any{"code": code, "message": msg},
+		})
 	}
-	if method == "tools/call" {
-		params, _ := req["params"].(map[string]interface{})
-		name, _ := params["name"].(string)
-		args, _ := params["arguments"].(map[string]interface{})
-		if args == nil {
-			args = map[string]interface{}{}
+
+	switch req.Method {
+	case "server/discover":
+		respond(map[string]any{
+			"supportedVersions": mcpVersions,
+			"protocolVersion":   "2026-07-28",
+			"serverInfo":        mcpServerInfo(),
+			"capabilities":      map[string]any{"tools": map[string]any{}},
+			"_meta": map[string]any{
+				"serverInfo":      mcpServerInfo(),
+				"protocolVersion": "2026-07-28",
+				"capabilities":    map[string]any{"tools": map[string]any{}},
+			},
+		})
+	case "initialize":
+		var params struct {
+			ProtocolVersion string `json:"protocolVersion"`
 		}
-		required, known := toolRequired[name]
-		if !known {
-			return rpcError(id, -32601, "Unknown tool: "+name, 200)
+		_ = json.Unmarshal(req.Params, &params)
+		version := params.ProtocolVersion
+		if !mcpLegacyVersions[version] {
+			version = "2025-11-25"
 		}
-		for _, reqArg := range required {
-			v := args[reqArg]
-			if v == nil || v == "" {
-				return rpcError(id, -32602, "Missing required argument: "+reqArg, 200)
+		respond(map[string]any{
+			"protocolVersion": version,
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      mcpServerInfo(),
+		})
+	case "ping":
+		respond(map[string]any{})
+	case "tools/list":
+		respond(map[string]any{"tools": mcpTools()})
+	case "tools/call":
+		s.mcpCall(w, id, req.Params, respond, respondErr)
+	default:
+		respondErr(-32601, "Method not found: "+req.Method)
+	}
+}
+
+// mcpCall runs one tools/call and writes its JSON-RPC answer.
+func (s *server) mcpCall(w http.ResponseWriter, id any, paramsRaw json.RawMessage, respond func(any), respondErr func(int, string)) {
+	var params struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	if err := json.Unmarshal(paramsRaw, &params); err != nil {
+		respondErr(-32602, "Invalid params")
+		return
+	}
+	if params.Arguments == nil {
+		params.Arguments = map[string]any{}
+	}
+	// Required-argument check per tool.
+	required := map[string][]string{
+		"create_repo":        {"name"},
+		"get_repo":           {"owner", "repo"},
+		"create_issue":       {"owner", "repo", "title"},
+		"list_issues":        {"owner", "repo"},
+		"create_pull_request": {"owner", "repo", "title", "head", "base"},
+		"merge_pull_request": {"owner", "repo", "pull_number"},
+	}
+	names, known := required[params.Name]
+	if !known {
+		respondErr(-32601, "Unknown tool: "+params.Name)
+		return
+	}
+	for _, key := range names {
+		if _, ok := params.Arguments[key]; !ok {
+			respond(map[string]any{
+				"content": []any{map[string]any{
+					"type": "text",
+					"text": "missing required argument: " + key,
+				}},
+				"isError": true,
+			})
+			return
+		}
+	}
+	argStr := func(key string) string {
+		if v, ok := params.Arguments[key].(string); ok {
+			return v
+		}
+		return ""
+	}
+	argBool := func(key string) bool {
+		if v, ok := params.Arguments[key].(bool); ok {
+			return v
+		}
+		return false
+	}
+	argInt := func(key string) int {
+		switch v := params.Arguments[key].(type) {
+		case float64:
+			return int(v)
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				return int(i)
+			}
+		case string:
+			if n, err := strconv.Atoi(v); err == nil {
+				return n
 			}
 		}
-		result, errMsg := callTool(s, name, args)
-		if errMsg != "" {
-			return rpcResult(id, toolError(errMsg))
-		}
-		return rpcResult(id, result)
+		return 0
 	}
-	return rpcError(id, -32601, "Method not found: "+method, 200)
-}
+	// The full_name argument, when present, selects the repository.
+	repoName := argStr("repo")
+	if full := argStr("full_name"); full != "" {
+		if parts := strings.SplitN(full, "/", 2); len(parts) == 2 {
+			repoName = parts[1]
+		}
+	}
+	result := func(obj any) {
+		text, _ := json.Marshal(obj)
+		respond(map[string]any{
+			"content": []any{map[string]any{
+				"type": "text",
+				"text": string(text),
+			}},
+			"structuredContent": obj,
+			"isError":           false,
+		})
+	}
+	fail := func(msg string) {
+		respond(map[string]any{
+			"content": []any{map[string]any{
+				"type": "text",
+				"text": msg,
+			}},
+			"isError": true,
+		})
+	}
 
-func callTool(s *Store, name string, args map[string]interface{}) (string, string) {
-	owner, _ := args["owner"].(string)
-	repoName, _ := args["repo"].(string)
-	switch name {
+	switch params.Name {
 	case "create_repo":
-		repoNameArg, _ := args["name"].(string)
-		desc, _ := args["description"].(string)
-		priv, _ := args["private"].(bool)
-		repo := s.createRepo(ViewerLogin, repoNameArg, desc, priv)
-		if repo == nil {
-			return "", "Repository already exists: " + ViewerLogin + "/" + repoNameArg
+		name := argStr("name")
+		s.store.mu.Lock()
+		rep, created := s.store.createRepo(name, argBool("private"), argStr("description"))
+		if !created {
+			s.store.mu.Unlock()
+			fail("Repository " + name + " already exists")
+			return
 		}
-		return toolResult(map[string]interface{}{
-			"id": repo.ID, "name": repo.Name, "full_name": repo.Owner + "/" + repo.Name,
-			"owner": map[string]interface{}{"login": repo.Owner}, "private": repo.Private,
-			"description": repo.Description, "default_branch": repo.DefaultBranch,
-		}), ""
+		out := repoJSON(s.store, rep)
+		s.store.mu.Unlock()
+		result(out)
 	case "get_repo":
-		repo := s.getRepo(owner, repoName)
-		if repo == nil {
-			return "", "Repository not found: " + owner + "/" + repoName
+		s.store.mu.RLock()
+		rep := s.store.lookup(argStr("owner"), repoName)
+		if rep == nil {
+			s.store.mu.RUnlock()
+			fail("Repository not found")
+			return
 		}
-		return toolResult(map[string]interface{}{
-			"id": repo.ID, "name": repo.Name, "full_name": repo.Owner + "/" + repo.Name,
-			"owner": map[string]interface{}{"login": repo.Owner}, "private": repo.Private,
-			"description": repo.Description, "default_branch": repo.DefaultBranch,
-		}), ""
+		out := repoJSON(s.store, rep)
+		s.store.mu.RUnlock()
+		result(out)
 	case "create_issue":
-		repo := s.getRepo(owner, repoName)
-		if repo == nil {
-			return "", "Repository not found: " + owner + "/" + repoName
+		s.store.mu.Lock()
+		rep := s.store.lookup(argStr("owner"), repoName)
+		if rep == nil {
+			s.store.mu.Unlock()
+			fail("Repository not found")
+			return
 		}
-		title, _ := args["title"].(string)
-		body, _ := args["body"].(string)
-		made, errStr := s.createIssue(repo, title, body, []string{})
-		if errStr != "" {
-			return "", errStr
+		is := &Issue{
+			ID:     s.store.nextID,
+			Number: rep.NextIssue,
+			Title:  argStr("title"),
+			Body:   argStr("body"),
+			State:  "open",
+			Seq:    s.store.tick(),
 		}
-		return toolResult(mcpIssueJSON(repo, made)), ""
+		s.store.nextID++
+		rep.NextIssue++
+		rep.Issues = append(rep.Issues, is)
+		out := issueJSON(s.store, rep, is)
+		s.store.mu.Unlock()
+		result(out)
 	case "list_issues":
-		repo := s.getRepo(owner, repoName)
-		if repo == nil {
-			return "", "Repository not found: " + owner + "/" + repoName
-		}
-		state, _ := args["state"].(string)
+		state := argStr("state")
 		if state == "" {
 			state = "open"
 		}
-		var list []map[string]interface{}
-		for _, i := range repo.Issues {
-			if state == "all" || i.State == state {
-				list = append(list, mcpIssueJSON(repo, i))
+		s.store.mu.RLock()
+		rep := s.store.lookup(argStr("owner"), repoName)
+		if rep == nil {
+			s.store.mu.RUnlock()
+			fail("Repository not found")
+			return
+		}
+		items := make([]any, 0)
+		for _, is := range rep.Issues {
+			if state == "all" || is.State == state {
+				items = append(items, issueJSON(s.store, rep, is))
 			}
 		}
-		// sort by number ascending
-		for i := 0; i < len(list); i++ {
-			for j := i + 1; j < len(list); j++ {
-				if list[j]["number"].(int) < list[i]["number"].(int) {
-					list[i], list[j] = list[j], list[i]
-				}
-			}
-		}
-		if list == nil {
-			list = []map[string]interface{}{}
-		}
-		return toolResult(list), ""
+		s.store.mu.RUnlock()
+		result(map[string]any{"issues": items})
 	case "create_pull_request":
-		repo := s.getRepo(owner, repoName)
-		if repo == nil {
-			return "", "Repository not found: " + owner + "/" + repoName
+		head := argStr("head")
+		base := argStr("base")
+		s.store.mu.Lock()
+		rep := s.store.lookup(argStr("owner"), repoName)
+		if rep == nil {
+			s.store.mu.Unlock()
+			fail("Repository not found")
+			return
 		}
-		title, _ := args["title"].(string)
-		body, _ := args["body"].(string)
-		head, _ := args["head"].(string)
-		base, _ := args["base"].(string)
-		made, errStr := s.createPull(repo, title, body, head, base)
-		if errStr != "" {
-			return "", errStr
+		if existing := rep.openPullFor(head, base); existing != nil {
+			out := pullJSON(s, rep, existing)
+			s.store.mu.Unlock()
+			result(out)
+			return
 		}
-		return toolResult(mcpPRJSON(repo, made)), ""
+		headSHA := rep.tipOf(head)
+		baseSHA := rep.tipOf(base)
+		if headSHA == "" || baseSHA == "" {
+			s.store.mu.Unlock()
+			fail("head or base branch does not exist")
+			return
+		}
+		p := &Pull{
+			ID:      s.store.nextID,
+			Number:  rep.NextPull,
+			Title:   argStr("title"),
+			Body:    "",
+			State:   "open",
+			Head:    head,
+			Base:    base,
+			HeadSHA: headSHA,
+			BaseSHA: baseSHA,
+			Seq:     s.store.tick(),
+		}
+		s.store.nextID++
+		rep.NextPull++
+		rep.Pulls = append(rep.Pulls, p)
+		out := pullJSON(s, rep, p)
+		s.store.mu.Unlock()
+		result(out)
 	case "merge_pull_request":
-		repo := s.getRepo(owner, repoName)
-		if repo == nil {
-			return "", "Repository not found: " + owner + "/" + repoName
+		num := argInt("pull_number")
+		s.store.mu.Lock()
+		rep := s.store.lookup(argStr("owner"), repoName)
+		if rep == nil {
+			s.store.mu.Unlock()
+			fail("Repository not found")
+			return
 		}
-		pr := repo.Pulls[int(toFloat(args["pull_number"]))]
-		if pr == nil {
-			return "", "Pull request not found: " + strings.TrimSpace(jsonString(args["pull_number"]))
+		p := rep.findPull(num)
+		if p == nil {
+			s.store.mu.Unlock()
+			fail("Pull request not found")
+			return
 		}
-		ok, sha, reason := s.mergePull(repo, pr)
-		if !ok {
-			return "", reason
+		if _, merged := s.squashMerge(rep, p); !merged {
+			s.store.mu.Unlock()
+			fail("merge conflict")
+			return
 		}
-		return toolResult(map[string]interface{}{
-			"merged": true, "sha": sha, "message": "Merge pull request #" + itoa(pr.Number) + " from " + pr.HeadRef,
-		}), ""
+		out := pullJSON(s, rep, p)
+		s.store.mu.Unlock()
+		result(out)
 	}
-	return "", "Unknown tool: " + name
-}
-
-func jsonString(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	return strings.Trim(string(marshalJSON(v)), `"`)
-}
-
-func mcpIssueJSON(repo *Repo, issue *Issue) map[string]interface{} {
-	var labels []map[string]interface{}
-	for _, name := range issue.Labels {
-		labels = append(labels, map[string]interface{}{"name": name})
-	}
-	if labels == nil {
-		labels = []map[string]interface{}{}
-	}
-	return map[string]interface{}{
-		"id": issue.ID, "number": issue.Number, "title": issue.Title, "body": issue.Body,
-		"state": issue.State, "labels": labels, "user": map[string]interface{}{"login": issue.User},
-		"created_at": issue.CreatedAt, "updated_at": issue.UpdatedAt,
-		"html_url": "/" + repo.Owner + "/" + repo.Name + "/issues/" + itoa(issue.Number),
-	}
-}
-
-func mcpPRJSON(repo *Repo, pr *Pull) map[string]interface{} {
-	headSha := pr.HeadSha
-	if v, ok := repo.Refs["refs/heads/"+pr.HeadRef]; ok {
-		headSha = v
-	}
-	baseSha := pr.BaseSha
-	if v, ok := repo.Refs["refs/heads/"+pr.BaseRef]; ok {
-		baseSha = v
-	}
-	return map[string]interface{}{
-		"id": pr.ID, "number": pr.Number, "title": pr.Title, "body": pr.Body,
-		"state": pr.State, "merged": pr.Merged,
-		"head": map[string]interface{}{"ref": pr.HeadRef, "sha": headSha},
-		"base": map[string]interface{}{"ref": pr.BaseRef, "sha": baseSha},
-		"merged_at":       nullableStr(pr.MergedAt),
-		"merge_commit_sha": nullableStr(pr.MergeCommitSha),
-		"html_url":        "/" + repo.Owner + "/" + repo.Name + "/pull/" + itoa(pr.Number),
-	}
-}
-
-func nullableStr(s string) interface{} {
-	if s == "" {
-		return nil
-	}
-	return s
 }

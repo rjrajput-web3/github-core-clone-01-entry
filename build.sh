@@ -1,8 +1,17 @@
 #!/bin/sh
-# Build the statically linked Go binary committed alongside the sources.
-# Requires Go 1.25+. Produces ./forge (stripped, ~6.5 MB, fits the 8 MiB
-# per-file entry cap).
+# Build the forge binary: a static, trimmed Go build named "forge".
 set -e
 cd "$(dirname "$0")"
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o forge .
-ls -la forge
+
+if ! command -v go >/dev/null 2>&1; then
+  if [ -x "$HOME/workspace/tmp/go/bin/go" ]; then
+    export PATH="$HOME/workspace/tmp/go/bin:$PATH"
+  elif [ -x "/root/workspace/tmp/go/bin/go" ]; then
+    export PATH="/root/workspace/tmp/go/bin:$PATH"
+  fi
+fi
+
+export CGO_ENABLED=0
+export GOFLAGS=-mod=mod
+go build -trimpath -ldflags "-s -w" -o forge .
+ls -l forge

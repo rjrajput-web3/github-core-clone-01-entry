@@ -1,44 +1,99 @@
-// GitForge entrypoint (launcher): the MakeFun env runs `node main.ts`.
-// This file only spawns the statically linked Go binary (./forge) in the
-// same directory and waits for it to exit, forwarding its exit code. The
-// binary itself owns the port, the /register handshake and the /done poll
-// (see main.go). The binary is built from the Go sources in this repo with:
-//
-//   CGO_ENABLED=0 go build -ldflags="-s -w" -o forge .
-//
-// (see build.sh). It is committed alongside the sources so the entry is
-// self-contained: no toolchain is needed at grading time.
+// Launcher: starts the forge binary, registers its port with the trial
+// environment, then waits until the environment reports the trial is done.
+// Written as plain JavaScript inside the .ts file so it runs under any
+// Node 22 without type-stripping flags.
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
-import { spawn } from 'node:child_process';
-import { chmodSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+const here = path.dirname(fileURLToPath(import.meta.url));
+const forgePath = path.join(here, "forge");
+const envUrl = process.env.MAKEFUN_ENV_URL;
 
-const dir = dirname(fileURLToPath(import.meta.url));
-const binary = join(dir, 'forge');
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-try {
-  chmodSync(binary, 0o755);
-} catch {
-  // The exec bit is already set on the committed binary; keep going.
-}
-
-const child = spawn(binary, [], { stdio: 'inherit', env: process.env });
-child.on('error', (err) => {
-  process.stderr.write(`[entry] failed to start ${binary}: ${err.message}\n`);
-  process.exit(1);
-});
-child.on('exit', (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exit(code ?? 1);
-});
-
-// If the harness stops us, stop the child too.
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(sig, () => {
-    child.kill(sig);
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
+  return res;
 }
+
+async function main() {
+  const forge = spawn(forgePath, [], {
+    stdio: ["ignore", "pipe", "inherit"],
+    env: { ...process.env },
+  });
+
+  let port = 0;
+  const portPromise = new Promise((resolve, reject) => {
+    let buf = "";
+    forge.stdout.on("data", (chunk) => {
+      buf += chunk.toString();
+      const m = buf.match(/FORGE_PORT=(\d+)/);
+      if (m) {
+        port = Number(m[1]);
+        resolve(port);
+      }
+    });
+    forge.on("error", reject);
+    forge.on("exit", (code) => {
+      if (!port) reject(new Error("forge exited before reporting a port (code " + code + ")"));
+    });
+  });
+
+  if (!envUrl) {
+    // No trial environment: run the forge in the foreground.
+    forge.stdout.pipe(process.stdout);
+    const code = await new Promise((resolve) => forge.on("exit", resolve));
+    process.exit(code ?? 0);
+  }
+
+  try {
+    await portPromise;
+  } catch (err) {
+    console.error("[launcher] forge failed to start:", err.message);
+    process.exit(1);
+  }
+
+  // Register the port with the trial environment, retrying briefly.
+  let registered = false;
+  for (let attempt = 0; attempt < 30 && !registered; attempt++) {
+    try {
+      const res = await postJson(envUrl + "/register", { port });
+      if (res.ok || res.status === 200 || res.status === 204) {
+        registered = true;
+      } else {
+        await sleep(500);
+      }
+    } catch {
+      await sleep(500);
+    }
+  }
+  if (!registered) {
+    console.error("[launcher] could not register port with the environment");
+    forge.kill();
+    process.exit(1);
+  }
+
+  // Long-poll until the trial is done.
+  while (true) {
+    try {
+      const res = await fetch(envUrl + "/done");
+      if (res.ok) {
+        const body = await res.json();
+        if (body && body.done === true) break;
+      }
+    } catch {
+      // Transient network hiccup: keep polling.
+    }
+    await sleep(250);
+  }
+
+  forge.kill();
+  process.exit(0);
+}
+
+main();

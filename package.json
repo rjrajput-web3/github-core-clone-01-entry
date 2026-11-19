@@ -1,1 +1,1 @@
-{"description":"GitForge — standalone GitHub-compatible git forge (Go core, Node launcher)","name":"gitforge","scripts":{"build":"./build.sh","start":"node --experimental-strip-types main.ts"},"type":"module","version":"1.0.0"}
+{"main":"main.ts","name":"github-core-clone-01-entry","private":true,"type":"module","version":"1.0.0"}
